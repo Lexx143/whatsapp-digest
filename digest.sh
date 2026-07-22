@@ -43,13 +43,18 @@ verify_digest() {
   ) || return 1
   # защита от пустого ответа контролёра — тогда оставляем оригинал
   if [[ -s "$digest_file.verified" ]] && grep -q "🚨\|📅\|📊" "$digest_file.verified"; then
-    # отрезаем служебный отчёт контролёра до первого заголовка дайджеста
+    # отрезаем служебные части контролёра: всё до первого заголовка дайджеста
+    # и всё после него, что похоже на протокол проверки («Что удалено», «---» в хвосте)
     "$PY" - "$digest_file.verified" <<'PYEOF'
-import pathlib, sys
+import pathlib, re, sys
 p = pathlib.Path(sys.argv[1])
 t = p.read_text()
 i = min((j for j in (t.find(e) for e in ("🚨", "📅", "📊")) if j >= 0), default=0)
-p.write_text(t[i:].replace("**", ""))
+t = t[i:].replace("**", "")
+m = re.search(r"\n-{3,}\s*\n|\nЧто удалено", t)
+if m:
+    t = t[:m.start()]
+p.write_text(t.rstrip() + "\n")
 PYEOF
     mv "$digest_file.verified" "$digest_file"
   else
