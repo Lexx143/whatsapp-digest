@@ -63,6 +63,15 @@ PYEOF
   fi
 }
 
+# 0. Ждём сеть: после пробуждения Mac Wi-Fi поднимается позже launchd (до 5 минут)
+NET_OK=0
+for i in {1..30}; do
+  if curl -s --max-time 8 -o /dev/null "https://api.telegram.org"; then NET_OK=1; break; fi
+  echo "сеть недоступна, жду ($i/30)…"
+  sleep 10
+done
+[[ "$NET_OK" == "1" ]] || { echo "сети нет 5 минут — выхожу, launchd попробует завтра"; exit 1; }
+
 # 1. Обратная связь из Telegram (не критично при сбое)
 "$PY" "$SCRIPT_DIR/feedback.py" || echo "feedback.py упал — продолжаю"
 
@@ -87,17 +96,23 @@ if [[ "$SKIP_DAILY" == "0" ]]; then
 # 4. Анализ через Claude (headless)
 PROMPT="$(cat "$SCRIPT_DIR/prompt.md")
 Сегодня: $(date '+%A, %F %H:%M')."
-(
-  cd "$DATA_DIR"
-  # переменные вложенной сессии Claude Code ломают авторизацию CLI при ручном запуске
-  unset ANTHROPIC_BASE_URL CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID \
-        CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_OAUTH_SCOPES CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH \
-        CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH CLAUDE_AGENT_SDK_VERSION CLAUDE_CODE_EXECPATH \
-        CLAUDE_EFFORT AI_AGENT BAGGAGE 2>/dev/null || true
-  "$CLAUDE_BIN" -p "$PROMPT" --model "$CLAUDE_MODEL" --allowedTools "Read,Write" < /dev/null > "$WORK/digest.md"
-) || { notify_error "анализ (claude)"; exit 1; }
-
-[[ -s "$WORK/digest.md" ]] || { notify_error "анализ вернул пустой ответ"; exit 1; }
+ANALYSIS_OK=0
+for attempt in 1 2 3; do
+  if (
+    cd "$DATA_DIR"
+    # переменные вложенной сессии Claude Code ломают авторизацию CLI при ручном запуске
+    unset ANTHROPIC_BASE_URL CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID \
+          CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_OAUTH_SCOPES CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH \
+          CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH CLAUDE_AGENT_SDK_VERSION CLAUDE_CODE_EXECPATH \
+          CLAUDE_EFFORT AI_AGENT BAGGAGE 2>/dev/null || true
+    "$CLAUDE_BIN" -p "$PROMPT" --model "$CLAUDE_MODEL" --allowedTools "Read,Write" < /dev/null > "$WORK/digest.md"
+  ) && [[ -s "$WORK/digest.md" ]] && ! grep -qi "request timed out" "$WORK/digest.md"; then
+    ANALYSIS_OK=1; break
+  fi
+  echo "анализ: попытка $attempt не удалась, повтор через 60с"
+  sleep 60
+done
+[[ "$ANALYSIS_OK" == "1" ]] || { notify_error "анализ (claude, 3 попытки)"; exit 1; }
 
 # отрезаем служебный текст модели до начала дайджеста (первого 🚨)
 "$PY" - "$WORK/digest.md" <<'EOF'
